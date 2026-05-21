@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Gesture-Controlled 3D Particle System</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #canvas-container {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+  }
+  #webcam-wrapper {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    width: 240px;
+    height: 180px;
+    border: 2px solid rgba(255,255,255,0.25);
+    border-radius: 8px;
+    overflow: hidden;
+    z-index: 10;
+    background: #111;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  }
+  #webcam, #overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    transform: scaleX(-1); /* mirror */
+  }
+  #info {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 10;
+    background: rgba(0,0,0,0.45);
+    padding: 12px 16px;
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    max-width: 360px;
+    line-height: 1.5;
+    font-size: 13px;
+  }
+  #info h1 {
+    margin: 0 0 6px 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  #info .row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    opacity: 0.85;
+  }
+  #info .state {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,0.15);
+    font-size: 12px;
+  }
+  #info .state span { color: #6cf; font-weight: 600; }
+  #loading {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    font-size: 14px;
+  }
+  #loading .spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid rgba(255,255,255,0.2);
+    border-top-color: #6cf;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #start-btn {
+    margin-top: 18px;
+    padding: 10px 22px;
+    background: #6cf;
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #start-btn:hover { background: #8df; }
+  .error { color: #f66; margin-top: 12px; max-width: 80%; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="loading-text">Loading Three.js & MediaPipe…</div>
+  <button id="start-btn" style="display:none;">Start Camera</button>
+  <div id="error-msg" class="error"></div>
+</div>
+
+<div id="info">
+  <h1>Gesture-Controlled Particles</h1>
+  <div class="row"><span>✋ Open palm</span><span>spread particles</span></div>
+  <div class="row"><span>✊ Fist</span><span>contract to ball</span></div>
+  <div class="row"><span>☝️ One finger</span><span>"hello, world"</span></div>
+  <div class="row"><span>✌️ Two fingers</span><span>"I'am Qwen"</span></div>
+  <div class="state">Gesture: <span id="gesture-label">—</span> · Openness: <span id="openness-label">0.00</span></div>
+</div>
+
+<div id="canvas-container"></div>
+
+<div id="webcam-wrapper">
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- DOM ----------
+const loadingEl   = document.getElementById('loading');
+const loadingText = document.getElementById('loading-text');
+const startBtn    = document.getElementById('start-btn');
+const errorMsg    = document.getElementById('error-msg');
+const gestureLbl  = document.getElementById('gesture-label');
+const opennessLbl = document.getElementById('openness-label');
+const videoEl     = document.getElementById('webcam');
+const overlayEl   = document.getElementById('overlay');
+const overlayCtx  = overlayEl.getContext('2d');
+
+// ---------- Three.js scene ----------
+const PARTICLE_COUNT = 4000;
+const container = document.getElementById('canvas-container');
+
+const scene  = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000010, 0.02);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 0, 35);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000010, 1);
+container.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- Particle system ----------
+const positions   = new Float32Array(PARTICLE_COUNT * 3);  // current
+const targets     = new Float32Array(PARTICLE_COUNT * 3);  // target positions
+const velocities  = new Float32Array(PARTICLE_COUNT * 3);
+const colors      = new Float32Array(PARTICLE_COUNT * 3);
+const baseColors  = new Float32Array(PARTICLE_COUNT * 3);
+
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  const i3 = i * 3;
+  // initial random sphere
+  const r = Math.cbrt(Math.random()) * 8;
+  const theta = Math.random() * Math.PI * 2;
+  const phi   = Math.acos(2 * Math.random() - 1);
+  positions[i3]   = r * Math.sin(phi) * Math.cos(theta);
+  positions[i3+1] = r * Math.sin(phi) * Math.sin(theta);
+  positions[i3+2] = r * Math.cos(phi);
+  targets[i3]   = positions[i3];
+  targets[i3+1] = positions[i3+1];
+  targets[i3+2] = positions[i3+2];
+
+  // color hue per particle
+  const hue = (i / PARTICLE_COUNT) * 360;
+  const c = new THREE.Color(`hsl(${hue}, 80%, 60%)`);
+  baseColors[i3]   = c.r; baseColors[i3+1] = c.g; baseColors[i3+2] = c.b;
+  colors[i3]       = c.r; colors[i3+1]     = c.g; colors[i3+2]     = c.b;
+}
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
+
+// Circular soft sprite via canvas texture
+function makeSpriteTexture() {
+  const size = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.4, 'rgba(255,255,255,0.7)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(c);
+}
+
+const material = new THREE.PointsMaterial({
+  size: 0.25,
+  vertexColors: true,
+  map: makeSpriteTexture(),
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+// ---------- Target generators ----------
+// Sphere targets (for fist / no detection)
+const sphereTargets = new Float32Array(PARTICLE_COUNT * 3);
+{
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const r = 4 + Math.random() * 0.6;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    sphereTargets[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+    sphereTargets[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    sphereTargets[i*3+2] = r * Math.cos(phi);
+  }
+}
+
+// Cloud / spread targets (for open palm)
+const cloudTargets = new Float32Array(PARTICLE_COUNT * 3);
+{
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const r = 8 + Math.random() * 6;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    cloudTargets[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+    cloudTargets[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    cloudTargets[i*3+2] = (r * Math.cos(phi)) * 0.7;
+  }
+}
+
+// Sample 2D text into particle targets by rendering to an offscreen canvas
+function makeTextTargets(text) {
+  const out = new Float32Array(PARTICLE_COUNT * 3);
+  const w = 1024, h = 256;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 160px -apple-system, "Segoe UI", sans-serif';
+  ctx.fillText(text, w/2, h/2);
+
+  const img = ctx.getImageData(0, 0, w, h).data;
+  const pts = [];
+  // Subsample to find bright pixels
+  const step = 2;
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) {
+      const idx = (y * w + x) * 4;
+      if (img[idx] > 128) {
+        pts.push([x, y]);
+      }
+    }
+  }
+
+  if (pts.length === 0) {
+    // fallback to sphere
+    return sphereTargets.slice();
+  }
+
+  // Map text pixels to world coords. Scale to ~ width 24, height 6
+  const targetW = 24, targetH = 6;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = pts[Math.floor(Math.random() * pts.length)];
+    const nx = (p[0] / w - 0.5) * targetW;
+    const ny = -(p[1] / h - 0.5) * targetH;
+    const nz = (Math.random() - 0.5) * 0.8; // slight depth
+    out[i*3]   = nx + (Math.random() - 0.5) * 0.15;
+    out[i*3+1] = ny + (Math.random() - 0.5) * 0.15;
+    out[i*3+2] = nz;
+  }
+  return out;
+}
+
+const helloTargets = makeTextTargets('hello, world');
+const qwenTargets  = makeTextTargets("I'am Qwen");
+
+// ---------- Gesture state ----------
+const STATE = {
+  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2'
+  openness: 0,        // 0..1
+  rotateText: false,
+};
+
+// Animation: blend toward chosen targets
+let currentSpread = 0; // 0..1 lerp between sphere and cloud
+function pickTargets() {
+  if (STATE.mode === 'text1') return helloTargets;
+  if (STATE.mode === 'text2') return qwenTargets;
+  return null; // sphere/cloud handled below with openness
+}
+
+// ---------- Render loop ----------
+const clock = new THREE.Clock();
+let textRotation = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  // Decide target buffer
+  const chosen = pickTargets();
+  const useTextMode = chosen !== null;
+
+  // Update spread interpolation for sphere/cloud modes
+  const targetSpread = THREE.MathUtils.clamp(STATE.openness, 0, 1);
+  currentSpread += (targetSpread - currentSpread) * Math.min(1, dt * 4);
+
+  // Compute each particle's target this frame
+  const tgt = targets;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    let tx, ty, tz;
+    if (useTextMode) {
+      tx = chosen[i3];
+      ty = chosen[i3+1];
+      tz = chosen[i3+2];
+    } else {
+      // blend sphere ↔ cloud by openness
+      const s = currentSpread;
+      tx = sphereTargets[i3]   * (1 - s) + cloudTargets[i3]   * s;
+      ty = sphereTargets[i3+1] * (1 - s) + cloudTargets[i3+1] * s;
+      tz = sphereTargets[i3+2] * (1 - s) + cloudTargets[i3+2] * s;
+    }
+    tgt[i3] = tx; tgt[i3+1] = ty; tgt[i3+2] = tz;
+  }
+
+  // Spring-toward-target with damping
+  const stiffness = useTextMode ? 6.0 : 4.0;
+  const damping   = 0.86;
+  const pos = positions;
+  const vel = velocities;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    const ax = (tgt[i3]   - pos[i3])   * stiffness;
+    const ay = (tgt[i3+1] - pos[i3+1]) * stiffness;
+    const az = (tgt[i3+2] - pos[i3+2]) * stiffness;
+    vel[i3]   = (vel[i3]   + ax * dt) * damping;
+    vel[i3+1] = (vel[i3+1] + ay * dt) * damping;
+    vel[i3+2] = (vel[i3+2] + az * dt) * damping;
+    pos[i3]   += vel[i3]   * dt * 60 * 0.016; // normalize step
+    pos[i3+1] += vel[i3+1] * dt * 60 * 0.016;
+    pos[i3+2] += vel[i3+2] * dt * 60 * 0.016;
+  }
+  geometry.attributes.position.needsUpdate = true;
+
+  // 3D rotation for text mode
+  if (useTextMode) {
+    textRotation += dt * 0.6;
+    points.rotation.y = Math.sin(textRotation) * 0.6;
+    points.rotation.x = Math.sin(textRotation * 0.7) * 0.25;
+  } else {
+    // Idle rotation for sphere/cloud
+    points.rotation.y += dt * 0.15;
+    points.rotation.x += dt * 0.05;
+  }
+
+  // Pulse colors based on mode
+  const colorShift = (Math.sin(performance.now() * 0.0015) + 1) * 0.5;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    const tint = useTextMode ? 1.2 : 1.0;
+    colors[i3]   = baseColors[i3]   * (0.7 + colorShift * 0.5) * tint;
+    colors[i3+1] = baseColors[i3+1] * (0.7 + colorShift * 0.5) * tint;
+    colors[i3+2] = baseColors[i3+2] * (0.7 + colorShift * 0.5) * tint;
+  }
+  geometry.attributes.color.needsUpdate = true;
+
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------- MediaPipe Hands ----------
+// Loaded dynamically. CDN script tags.
+async function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.crossOrigin = 'anonymous';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function initMediaPipe() {
+  loadingText.textContent = 'Loading MediaPipe Hands…';
+  await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
+  await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
+  await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js');
+
+  const hands = new window.Hands({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.5,
+  });
+  hands.onResults(onHandsResults);
+
+  loadingText.textContent = 'Starting camera…';
+  const cam = new window.Camera(videoEl, {
+    onFrame: async () => { await hands.send({ image: videoEl }); },
+    width: 640,
+    height: 480,
+  });
+  await cam.start();
+}
+
+// ---------- Gesture classification ----------
+// MediaPipe hand landmarks: 0 wrist, then 4 fingers each with 4 points.
+// Thumb tip = 4, index tip = 8, middle = 12, ring = 16, pinky = 20.
+// PIP joints: index 6, middle 10, ring 14, pinky 18.
+// MCP joints: index 5, middle 9, ring 13, pinky 17.
+
+function dist(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z||0) - (b.z||0);
+  return Math.sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+function classify(landmarks) {
+  // Use palm size = wrist to middle MCP as scale reference
+  const palm = dist(landmarks[0], landmarks[9]) || 1e-6;
+
+  // A finger is "extended" if its tip is farther from wrist than its PIP joint
+  // AND the tip-to-pip distance is meaningful relative to palm size.
+  const isExtended = (tipIdx, pipIdx, mcpIdx) => {
+    const tipFromWrist = dist(landmarks[0], landmarks[tipIdx]);
+    const pipFromWrist = dist(landmarks[0], landmarks[pipIdx]);
+    return tipFromWrist > pipFromWrist * 1.05;
+  };
+
+  // Thumb is special — compare x of tip vs ip joint relative to hand orientation.
+  // We use distance from index MCP for a simpler robust check.
+  const thumbExtended = dist(landmarks[4], landmarks[5]) > dist(landmarks[3], landmarks[5]) * 1.1;
+
+  const indexExt  = isExtended(8,  6,  5);
+  const middleExt = isExtended(12, 10, 9);
+  const ringExt   = isExtended(16, 14, 13);
+  const pinkyExt  = isExtended(20, 18, 17);
+
+  const fingerCount = (indexExt?1:0) + (middleExt?1:0) + (ringExt?1:0) + (pinkyExt?1:0);
+
+  // Openness: average tip distance from wrist normalized by palm size
+  const tips = [8, 12, 16, 20];
+  let avg = 0;
+  for (const t of tips) avg += dist(landmarks[0], landmarks[t]);
+  avg /= tips.length;
+  const openness = THREE.MathUtils.clamp((avg / palm - 1.2) / 1.1, 0, 1);
+
+  // Gesture priority:
+  //   index only           → text1 (hello, world)
+  //   index + middle only  → text2 (I'am Qwen)
+  //   3+ fingers extended  → cloud (open palm)
+  //   0 fingers extended   → sphere (fist)
+  //   otherwise            → use openness to interpolate sphere↔cloud
+  let mode = 'sphere';
+  let label = 'fist';
+
+  if (indexExt && !middleExt && !ringExt && !pinkyExt) {
+    mode = 'text1'; label = '☝️ one — hello, world';
+  } else if (indexExt && middleExt && !ringExt && !pinkyExt) {
+    mode = 'text2'; label = "✌️ two — I'am Qwen";
+  } else if (fingerCount >= 3) {
+    mode = 'cloud'; label = '✋ open palm';
+  } else if (fingerCount === 0) {
+    mode = 'sphere'; label = '✊ fist';
+  } else {
+    mode = openness > 0.5 ? 'cloud' : 'sphere';
+    label = openness > 0.5 ? 'partial open' : 'partial closed';
+  }
+
+  return { mode, label, openness, fingerCount };
+}
+
+let lastMode = 'sphere';
+let modeHoldFrames = 0;
+const MODE_HOLD_REQUIRED = 4; // smoothing: require N consecutive frames
+
+function onHandsResults(results) {
+  // Draw overlay
+  overlayEl.width  = videoEl.videoWidth  || 320;
+  overlayEl.height = videoEl.videoHeight || 240;
+  overlayCtx.clearRect(0, 0, overlayEl.width, overlayEl.height);
+
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    const landmarks = results.multiHandLandmarks[0];
+
+    if (window.drawConnectors && window.HAND_CONNECTIONS) {
+      window.drawConnectors(overlayCtx, landmarks, window.HAND_CONNECTIONS,
+        { color: '#6cf', lineWidth: 2 });
+      window.drawLandmarks(overlayCtx, landmarks,
+        { color: '#fff', lineWidth: 1, radius: 2 });
+    }
+
+    const g = classify(landmarks);
+
+    if (g.mode === lastMode) {
+      modeHoldFrames++;
+    } else {
+      modeHoldFrames = 0;
+      lastMode = g.mode;
+    }
+    if (modeHoldFrames >= MODE_HOLD_REQUIRED) {
+      STATE.mode = g.mode;
+    }
+    STATE.openness = g.openness;
+
+    gestureLbl.textContent  = g.label;
+    opennessLbl.textContent = g.openness.toFixed(2);
+  } else {
+    gestureLbl.textContent  = 'no hand';
+    opennessLbl.textContent = '0.00';
+    // gently relax to sphere if no hand seen
+    STATE.openness *= 0.95;
+  }
+}
+
+// ---------- Startup ----------
+async function start() {
+  startBtn.style.display = 'none';
+  errorMsg.textContent = '';
+  try {
+    await initMediaPipe();
+    loadingEl.style.display = 'none';
+  } catch (err) {
+    console.error(err);
+    errorMsg.textContent = 'Camera/MediaPipe error: ' + err.message +
+      ' — make sure you allowed camera permission and are serving over http(s).';
+    startBtn.style.display = 'inline-block';
+    startBtn.textContent = 'Retry';
+  }
+}
+
+startBtn.style.display = 'inline-block';
+loadingText.textContent = 'Click Start Camera to enable webcam';
+startBtn.addEventListener('click', start);
+</script>
+</body>
+</html>
