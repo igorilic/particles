@@ -122,6 +122,7 @@
   <div class="row"><span>✊ Fist</span><span>contract to ball</span></div>
   <div class="row"><span>☝️ One finger</span><span>"hello, world"</span></div>
   <div class="row"><span>✌️ Two fingers</span><span>"I'am Qwen"</span></div>
+  <div class="row"><span>🖖 Four fingers</span><span>💥 explode → "Hello Najdan!"</span></div>
   <div class="state">Gesture: <span id="gesture-label">—</span> · Openness: <span id="openness-label">0.00</span></div>
 </div>
 
@@ -308,14 +309,16 @@ function makeTextTargets(text) {
   return out;
 }
 
-const helloTargets = makeTextTargets('hello, world');
-const qwenTargets  = makeTextTargets("I'am Qwen");
+const helloTargets  = makeTextTargets('hello, world');
+const qwenTargets   = makeTextTargets("I'am Qwen");
+const najdanTargets = makeTextTargets('Hello Najdan!');
 
 // ---------- Gesture state ----------
 const STATE = {
-  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2'
+  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2' | 'text3'
   openness: 0,        // 0..1
   rotateText: false,
+  explodeUntil: 0,    // timestamp (ms) until which explosion physics applies
 };
 
 // Animation: blend toward chosen targets
@@ -323,7 +326,25 @@ let currentSpread = 0; // 0..1 lerp between sphere and cloud
 function pickTargets() {
   if (STATE.mode === 'text1') return helloTargets;
   if (STATE.mode === 'text2') return qwenTargets;
+  if (STATE.mode === 'text3') return najdanTargets;
   return null; // sphere/cloud handled below with openness
+}
+
+// Trigger an outward velocity burst on every particle
+function triggerExplosion(strength = 40) {
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const i3 = i * 3;
+    const x = positions[i3], y = positions[i3+1], z = positions[i3+2];
+    const len = Math.sqrt(x*x + y*y + z*z) || 1e-6;
+    // outward direction with random jitter
+    const jx = (Math.random() - 0.5) * 0.4;
+    const jy = (Math.random() - 0.5) * 0.4;
+    const jz = (Math.random() - 0.5) * 0.4;
+    velocities[i3]   = (x/len + jx) * strength;
+    velocities[i3+1] = (y/len + jy) * strength;
+    velocities[i3+2] = (z/len + jz) * strength;
+  }
+  STATE.explodeUntil = performance.now() + 600; // 0.6s of weaker spring
 }
 
 // ---------- Render loop ----------
@@ -362,8 +383,9 @@ function animate() {
   }
 
   // Spring-toward-target with damping
-  const stiffness = useTextMode ? 6.0 : 4.0;
-  const damping   = 0.86;
+  const exploding = performance.now() < STATE.explodeUntil;
+  const stiffness = exploding ? 0.5 : (useTextMode ? 6.0 : 4.0);
+  const damping   = exploding ? 0.97 : 0.86;
   const pos = positions;
   const vel = velocities;
   for (let i = 0; i < PARTICLE_COUNT; i++) {
@@ -487,11 +509,12 @@ function classify(landmarks) {
   const openness = THREE.MathUtils.clamp((avg / palm - 1.2) / 1.1, 0, 1);
 
   // Gesture priority:
-  //   index only           → text1 (hello, world)
-  //   index + middle only  → text2 (I'am Qwen)
-  //   3+ fingers extended  → cloud (open palm)
-  //   0 fingers extended   → sphere (fist)
-  //   otherwise            → use openness to interpolate sphere↔cloud
+  //   index only             → text1 (hello, world)
+  //   index + middle only    → text2 (I'am Qwen)
+  //   4 fingers (no thumb)   → text3 (Hello Najdan!) with explosion burst
+  //   5 fingers / open palm  → cloud
+  //   0 fingers extended     → sphere (fist)
+  //   otherwise              → use openness to interpolate sphere↔cloud
   let mode = 'sphere';
   let label = 'fist';
 
@@ -499,7 +522,9 @@ function classify(landmarks) {
     mode = 'text1'; label = '☝️ one — hello, world';
   } else if (indexExt && middleExt && !ringExt && !pinkyExt) {
     mode = 'text2'; label = "✌️ two — I'am Qwen";
-  } else if (fingerCount >= 3) {
+  } else if (indexExt && middleExt && ringExt && pinkyExt && !thumbExtended) {
+    mode = 'text3'; label = '🖖 four — 💥 Hello Najdan!';
+  } else if (fingerCount >= 3 || (thumbExtended && fingerCount >= 3)) {
     mode = 'cloud'; label = '✋ open palm';
   } else if (fingerCount === 0) {
     mode = 'sphere'; label = '✊ fist';
@@ -540,6 +565,9 @@ function onHandsResults(results) {
       lastMode = g.mode;
     }
     if (modeHoldFrames >= MODE_HOLD_REQUIRED) {
+      if (STATE.mode !== g.mode && g.mode === 'text3') {
+        triggerExplosion(45);
+      }
       STATE.mode = g.mode;
     }
     STATE.openness = g.openness;
