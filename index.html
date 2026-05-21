@@ -123,6 +123,7 @@
   <div class="row"><span>☝️ One finger</span><span>"hello, world"</span></div>
   <div class="row"><span>✌️ Two fingers</span><span>"I'am Qwen"</span></div>
   <div class="row"><span>🖖 Four fingers</span><span>💥 explode → "Hello Najdan!"</span></div>
+  <div class="row"><span>🦋 Butterfly hands</span><span>two hands, thumbs touching</span></div>
   <div class="state">Gesture: <span id="gesture-label">—</span> · Openness: <span id="openness-label">0.00</span></div>
 </div>
 
@@ -313,13 +314,94 @@ const helloTargets  = makeTextTargets('hello, world');
 const qwenTargets   = makeTextTargets("I'am Qwen");
 const najdanTargets = makeTextTargets('Hello Najdan!');
 
+// Butterfly silhouette: render filled wings + body to canvas, sample bright pixels.
+// Stored as the flat base shape in XY plane; wing flap is added per-frame in Z.
+function makeButterflyTargets() {
+  const out = new Float32Array(PARTICLE_COUNT * 3);
+  const w = 1024, h = 720;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#fff';
+
+  const cx = w / 2, cy = h / 2;
+
+  // Upper wings (large)
+  const drawWing = (signX, ellipses) => {
+    for (const [ox, oy, rx, ry, rot] of ellipses) {
+      ctx.beginPath();
+      ctx.ellipse(cx + signX * ox, cy + oy, rx, ry, signX * rot, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+
+  // Each wing = stack of ellipses giving a teardrop/lobed shape
+  const upperWing = [
+    [180, -60, 200, 150, -0.25],
+    [240,  20, 160, 130, -0.10],
+    [120, -140, 110,  90, -0.40],
+  ];
+  const lowerWing = [
+    [140, 140, 140, 110, 0.20],
+    [180, 200,  90,  80, 0.30],
+  ];
+
+  drawWing(+1, upperWing);
+  drawWing(-1, upperWing);
+  drawWing(+1, lowerWing);
+  drawWing(-1, lowerWing);
+
+  // Body (thin vertical ellipse)
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, 18, 130, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Antennae (two thin lines as filled curves)
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(cx - 6, cy - 130);
+  ctx.quadraticCurveTo(cx - 40, cy - 200, cx - 70, cy - 220);
+  ctx.moveTo(cx + 6, cy - 130);
+  ctx.quadraticCurveTo(cx + 40, cy - 200, cx + 70, cy - 220);
+  ctx.stroke();
+
+  const img = ctx.getImageData(0, 0, w, h).data;
+  const pts = [];
+  const step = 2;
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) {
+      if (img[(y * w + x) * 4] > 128) pts.push([x, y]);
+    }
+  }
+  if (pts.length === 0) return sphereTargets.slice();
+
+  const targetW = 22, targetH = 16;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = pts[Math.floor(Math.random() * pts.length)];
+    const nx = (p[0] / w - 0.5) * targetW;
+    const ny = -(p[1] / h - 0.5) * targetH;
+    out[i*3]   = nx + (Math.random() - 0.5) * 0.15;
+    out[i*3+1] = ny + (Math.random() - 0.5) * 0.15;
+    out[i*3+2] = (Math.random() - 0.5) * 0.4;
+  }
+  return out;
+}
+
+const butterflyBase = makeButterflyTargets();
+
 // ---------- Gesture state ----------
 const STATE = {
-  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2' | 'text3'
+  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2' | 'text3' | 'butterfly'
   openness: 0,        // 0..1
   rotateText: false,
   explodeUntil: 0,    // timestamp (ms) until which explosion physics applies
 };
+
+// Scratch buffer for dynamically-computed targets (butterfly flap)
+const dynamicTargets = new Float32Array(PARTICLE_COUNT * 3);
 
 // Animation: blend toward chosen targets
 let currentSpread = 0; // 0..1 lerp between sphere and cloud
@@ -327,6 +409,23 @@ function pickTargets() {
   if (STATE.mode === 'text1') return helloTargets;
   if (STATE.mode === 'text2') return qwenTargets;
   if (STATE.mode === 'text3') return najdanTargets;
+  if (STATE.mode === 'butterfly') {
+    // Wing flap: oscillate Z by sin(t) scaled by |x| so wing tips move most.
+    // Body (small |x|) stays put.
+    const t = performance.now() * 0.005;
+    const flap = Math.sin(t * 1.8);
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const i3 = i * 3;
+      const bx = butterflyBase[i3];
+      const by = butterflyBase[i3+1];
+      const bz = butterflyBase[i3+2];
+      const wingAmount = Math.min(Math.abs(bx) / 11, 1); // 0 at body, 1 at wing tip
+      dynamicTargets[i3]   = bx;
+      dynamicTargets[i3+1] = by;
+      dynamicTargets[i3+2] = bz + flap * wingAmount * 4.5;
+    }
+    return dynamicTargets;
+  }
   return null; // sphere/cloud handled below with openness
 }
 
@@ -451,7 +550,7 @@ async function initMediaPipe() {
     locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
   });
   hands.setOptions({
-    maxNumHands: 1,
+    maxNumHands: 2,
     modelComplexity: 1,
     minDetectionConfidence: 0.6,
     minTrackingConfidence: 0.5,
@@ -547,16 +646,43 @@ function onHandsResults(results) {
   overlayCtx.clearRect(0, 0, overlayEl.width, overlayEl.height);
 
   if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-    const landmarks = results.multiHandLandmarks[0];
+    const allHands = results.multiHandLandmarks;
 
     if (window.drawConnectors && window.HAND_CONNECTIONS) {
-      window.drawConnectors(overlayCtx, landmarks, window.HAND_CONNECTIONS,
-        { color: '#6cf', lineWidth: 2 });
-      window.drawLandmarks(overlayCtx, landmarks,
-        { color: '#fff', lineWidth: 1, radius: 2 });
+      for (const lm of allHands) {
+        window.drawConnectors(overlayCtx, lm, window.HAND_CONNECTIONS,
+          { color: '#6cf', lineWidth: 2 });
+        window.drawLandmarks(overlayCtx, lm,
+          { color: '#fff', lineWidth: 1, radius: 2 });
+      }
     }
 
-    const g = classify(landmarks);
+    // Two-hand butterfly: thumbs touching + both hands have spread fingers
+    let g;
+    if (allHands.length >= 2) {
+      const h1 = allHands[0], h2 = allHands[1];
+      const thumbDist = dist(h1[4], h2[4]);
+      const palm1 = dist(h1[0], h1[9]) || 1e-6;
+      const palm2 = dist(h2[0], h2[9]) || 1e-6;
+      const avgPalm = (palm1 + palm2) / 2;
+
+      // Spread check: how many fingers extended on each hand
+      const handSpread = (lm) => {
+        const ext = (tip, pip) => dist(lm[0], lm[tip]) > dist(lm[0], lm[pip]) * 1.05;
+        return (ext(8,6)?1:0) + (ext(12,10)?1:0) + (ext(16,14)?1:0) + (ext(20,18)?1:0);
+      };
+      const spread1 = handSpread(h1);
+      const spread2 = handSpread(h2);
+
+      if (thumbDist < avgPalm * 0.9 && spread1 >= 3 && spread2 >= 3) {
+        g = { mode: 'butterfly', label: '🦋 butterfly hands', openness: 1, fingerCount: spread1 + spread2 };
+      } else {
+        // Two hands visible but not butterfly pose — classify the larger/closer hand
+        g = classify(palm1 >= palm2 ? h1 : h2);
+      }
+    } else {
+      g = classify(allHands[0]);
+    }
 
     if (g.mode === lastMode) {
       modeHoldFrames++;
