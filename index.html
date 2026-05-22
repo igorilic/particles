@@ -124,6 +124,7 @@
   <div class="row"><span>✌️ Two fingers</span><span>"I'am Qwen"</span></div>
   <div class="row"><span>🖖 Four fingers</span><span>💥 explode → "Hello Najdan!"</span></div>
   <div class="row"><span>🦋 Butterfly hands</span><span>two hands, thumbs touching</span></div>
+  <div class="row"><span>💀 No hands</span><span>skull mirrors your smile / frown</span></div>
   <div class="state">Gesture: <span id="gesture-label">—</span> · Openness: <span id="openness-label">0.00</span></div>
 </div>
 
@@ -392,12 +393,113 @@ function makeButterflyTargets() {
 
 const butterflyBase = makeButterflyTargets();
 
+// Skull silhouette with expression-controlled mouth.
+// Renders cranium + jaw filled, cuts out eyes/nose, strokes mouth as
+// gap so the empty curve reads as a smile or frown in the particle cloud.
+function makeSkullTargets(mood) {
+  const out = new Float32Array(PARTICLE_COUNT * 3);
+  const w = 800, h = 800;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+
+  const cx = w / 2, cy = h / 2;
+
+  ctx.fillStyle = '#fff';
+  // Cranium
+  ctx.beginPath();
+  ctx.ellipse(cx, cy - 90, 235, 215, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Jaw + connector
+  ctx.fillRect(cx - 205, cy + 20, 410, 60);
+  ctx.beginPath();
+  ctx.moveTo(cx - 195, cy + 60);
+  ctx.lineTo(cx - 140, cy + 250);
+  ctx.quadraticCurveTo(cx, cy + 320, cx + 140, cy + 250);
+  ctx.lineTo(cx + 195, cy + 60);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cut out features
+  ctx.globalCompositeOperation = 'destination-out';
+
+  // Eye sockets
+  ctx.beginPath();
+  ctx.ellipse(cx - 95, cy - 70, 60, 55, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(cx + 95, cy - 70, 60, 55, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Nose (inverted triangle)
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + 10);
+  ctx.lineTo(cx - 28, cy + 80);
+  ctx.lineTo(cx + 28, cy + 80);
+  ctx.closePath();
+  ctx.fill();
+
+  // Mouth curve — gap drawn by stroking with destination-out
+  ctx.lineWidth = 18;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  if (mood === 'sad') {
+    // Frown: corners low, middle high
+    ctx.moveTo(cx - 110, cy + 230);
+    ctx.quadraticCurveTo(cx, cy + 160, cx + 110, cy + 230);
+  } else {
+    // Smile: corners high, middle low
+    ctx.moveTo(cx - 110, cy + 160);
+    ctx.quadraticCurveTo(cx, cy + 240, cx + 110, cy + 160);
+  }
+  ctx.stroke();
+
+  // Teeth gaps (vertical strokes through mouth band) for extra skull feel
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(cx + i * 35, cy + 165);
+    ctx.lineTo(cx + i * 35, cy + 235);
+    ctx.lineWidth = 6;
+    ctx.stroke();
+  }
+
+  ctx.globalCompositeOperation = 'source-over';
+
+  const img = ctx.getImageData(0, 0, w, h).data;
+  const pts = [];
+  const step = 2;
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) {
+      if (img[(y * w + x) * 4] > 128) pts.push([x, y]);
+    }
+  }
+  if (pts.length === 0) return sphereTargets.slice();
+
+  const targetW = 16, targetH = 16;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = pts[Math.floor(Math.random() * pts.length)];
+    const nx = (p[0] / w - 0.5) * targetW;
+    const ny = -(p[1] / h - 0.5) * targetH;
+    out[i*3]   = nx + (Math.random() - 0.5) * 0.15;
+    out[i*3+1] = ny + (Math.random() - 0.5) * 0.15;
+    out[i*3+2] = (Math.random() - 0.5) * 0.6;
+  }
+  return out;
+}
+
+const skullHappy = makeSkullTargets('happy');
+const skullSad   = makeSkullTargets('sad');
+
 // ---------- Gesture state ----------
 const STATE = {
-  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2' | 'text3' | 'butterfly'
+  mode: 'sphere',     // 'sphere' | 'cloud' | 'text1' | 'text2' | 'text3' | 'butterfly' | 'skull'
   openness: 0,        // 0..1
   rotateText: false,
   explodeUntil: 0,    // timestamp (ms) until which explosion physics applies
+  expression: 'happy',// 'happy' | 'sad' — for skull mouth shape
+  faceLastSeen: 0,    // timestamp ms
 };
 
 // Scratch buffer for dynamically-computed targets (butterfly flap)
@@ -409,6 +511,7 @@ function pickTargets() {
   if (STATE.mode === 'text1') return helloTargets;
   if (STATE.mode === 'text2') return qwenTargets;
   if (STATE.mode === 'text3') return najdanTargets;
+  if (STATE.mode === 'skull')  return STATE.expression === 'sad' ? skullSad : skullHappy;
   if (STATE.mode === 'butterfly') {
     // Wing flap: oscillate Z by sin(t) scaled by |x| so wing tips move most.
     // Body (small |x|) stays put.
@@ -545,6 +648,8 @@ async function initMediaPipe() {
   await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
   await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
   await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js');
+  loadingText.textContent = 'Loading MediaPipe Face Mesh…';
+  await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js');
 
   const hands = new window.Hands({
     locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
@@ -557,13 +662,56 @@ async function initMediaPipe() {
   });
   hands.onResults(onHandsResults);
 
+  const faceMesh = new window.FaceMesh({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
+  });
+  faceMesh.setOptions({
+    maxNumFaces: 1,
+    refineLandmarks: false,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+  faceMesh.onResults(onFaceResults);
+
   loadingText.textContent = 'Starting camera…';
   const cam = new window.Camera(videoEl, {
-    onFrame: async () => { await hands.send({ image: videoEl }); },
+    onFrame: async () => {
+      await hands.send({ image: videoEl });
+      await faceMesh.send({ image: videoEl });
+    },
     width: 640,
     height: 480,
   });
   await cam.start();
+}
+
+// Classify smile vs frown from Face Mesh landmarks.
+// Mouth landmarks: 61 left corner, 291 right corner, 13 upper-lip top, 14 lower-lip bottom.
+// If corners sit higher (smaller y) than the mouth center → smile.
+function onFaceResults(results) {
+  if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
+  const lm = results.multiFaceLandmarks[0];
+  const leftCorner  = lm[61];
+  const rightCorner = lm[291];
+  const upper = lm[13];
+  const lower = lm[14];
+  if (!leftCorner || !rightCorner || !upper || !lower) return;
+
+  const cornersY = (leftCorner.y + rightCorner.y) / 2;
+  const centerY  = (upper.y + lower.y) / 2;
+
+  // Normalize by face height (landmark 10 = top of head, 152 = chin)
+  const faceTop = lm[10], chin = lm[152];
+  const faceH = (faceTop && chin) ? Math.abs(chin.y - faceTop.y) : 0.3;
+
+  const smileScore = (centerY - cornersY) / faceH; // >0 corners up = smile
+
+  // Hysteresis bands so the mouth doesn't flicker around neutral
+  if (smileScore > 0.012)      STATE.expression = 'happy';
+  else if (smileScore < -0.004) STATE.expression = 'sad';
+  // else: keep previous expression
+
+  STATE.faceLastSeen = performance.now();
 }
 
 // ---------- Gesture classification ----------
@@ -701,9 +849,19 @@ function onHandsResults(results) {
     gestureLbl.textContent  = g.label;
     opennessLbl.textContent = g.openness.toFixed(2);
   } else {
-    gestureLbl.textContent  = 'no hand';
+    // No hands — fall back to skull mode driven by facial expression if a
+    // face was seen recently (within 1.5s); otherwise relax to sphere.
+    const faceRecent = performance.now() - STATE.faceLastSeen < 1500;
+    if (faceRecent) {
+      STATE.mode = 'skull';
+      gestureLbl.textContent = STATE.expression === 'sad'
+        ? '💀 skull · 🙁 frown'
+        : '💀 skull · 🙂 smile';
+    } else {
+      STATE.mode = 'sphere';
+      gestureLbl.textContent = 'no hand · no face';
+    }
     opennessLbl.textContent = '0.00';
-    // gently relax to sphere if no hand seen
     STATE.openness *= 0.95;
   }
 }
