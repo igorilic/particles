@@ -21,6 +21,10 @@ A real-time, interactive 3D particle system controlled by your webcam. Hand gest
 
 All shapes are rendered with 3D rotation, additive-blended sprite particles, and a spring-toward-target physics loop, so transitions feel fluid and react in real time.
 
+### Customizing the text
+
+Click **⚙ Customize text** in the top-right to set your own strings for the three text-forming gestures. Changes regenerate the particle targets live (no reload) and persist across sessions via `localStorage`. Hit **Reset defaults** to clear them.
+
 ## Stack
 
 - **[Three.js 0.160](https://threejs.org/)** — particle rendering (`THREE.Points`, additive blending, per-particle HSL colors, soft sprite texture)

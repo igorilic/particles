@@ -71,6 +71,79 @@
     font-size: 12px;
   }
   #info .state span { color: #6cf; font-weight: 600; }
+  #settings {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 10;
+    font-size: 13px;
+  }
+  #settings-toggle {
+    background: rgba(0,0,0,0.45);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.2);
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    font-size: 13px;
+  }
+  #settings-toggle:hover { border-color: #6cf; }
+  #settings-panel {
+    margin-top: 8px;
+    background: rgba(0,0,0,0.55);
+    padding: 14px 16px;
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    width: 260px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  }
+  #settings-panel h2 {
+    margin: 0 0 10px 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: #6cf;
+  }
+  #settings-panel label {
+    display: block;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.8);
+  }
+  #settings-panel input[type="text"] {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 6px 8px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+    color: #fff;
+    font-size: 13px;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+  #settings-panel input[type="text"]:focus {
+    outline: none;
+    border-color: #6cf;
+    background: rgba(255,255,255,0.12);
+  }
+  #settings-reset {
+    margin-top: 4px;
+    width: 100%;
+    padding: 7px;
+    background: rgba(255,255,255,0.1);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #settings-reset:hover { background: rgba(255,255,255,0.18); }
+  #settings-panel[hidden] { display: none; }
   #loading {
     position: fixed;
     inset: 0;
@@ -126,6 +199,23 @@
   <div class="row"><span>🦋 Butterfly hands</span><span>two hands, thumbs touching</span></div>
   <div class="row"><span>💀 No hands</span><span>skull mirrors your smile / frown</span></div>
   <div class="state">Gesture: <span id="gesture-label">—</span> · Openness: <span id="openness-label">0.00</span></div>
+</div>
+
+<div id="settings">
+  <button id="settings-toggle" aria-expanded="false">⚙ Customize text</button>
+  <div id="settings-panel" hidden>
+    <h2>Particle text</h2>
+    <label>☝️ One finger
+      <input id="text1-input" type="text" maxlength="40" autocomplete="off" spellcheck="false" />
+    </label>
+    <label>✌️ Two fingers
+      <input id="text2-input" type="text" maxlength="40" autocomplete="off" spellcheck="false" />
+    </label>
+    <label>🖖 Four fingers
+      <input id="text3-input" type="text" maxlength="40" autocomplete="off" spellcheck="false" />
+    </label>
+    <button id="settings-reset">Reset defaults</button>
+  </div>
 </div>
 
 <div id="canvas-container"></div>
@@ -311,9 +401,24 @@ function makeTextTargets(text) {
   return out;
 }
 
-const helloTargets  = makeTextTargets('hello, world');
-const qwenTargets   = makeTextTargets("I'am Qwen");
-const najdanTargets = makeTextTargets('Hello Najdan!');
+// User-customizable text strings, persisted in localStorage.
+const TEXT_DEFAULTS = {
+  text1: 'hello, world',
+  text2: "I'am Qwen",
+  text3: 'Hello Najdan!',
+};
+const TEXT_KEY = (k) => `particles.${k}`;
+function loadText(k) {
+  return (localStorage.getItem(TEXT_KEY(k)) ?? '') || TEXT_DEFAULTS[k];
+}
+function saveText(k, v) {
+  if (v) localStorage.setItem(TEXT_KEY(k), v);
+  else   localStorage.removeItem(TEXT_KEY(k));
+}
+
+let helloTargets  = makeTextTargets(loadText('text1'));
+let qwenTargets   = makeTextTargets(loadText('text2'));
+let najdanTargets = makeTextTargets(loadText('text3'));
 
 // Butterfly silhouette: render filled wings + body to canvas, sample bright pixels.
 // Stored as the flat base shape in XY plane; wing flap is added per-frame in Z.
@@ -885,6 +990,51 @@ async function start() {
 startBtn.style.display = 'inline-block';
 loadingText.textContent = 'Click Start Camera to enable webcam';
 startBtn.addEventListener('click', start);
+
+// ---------- Settings panel ----------
+const settingsToggle = document.getElementById('settings-toggle');
+const settingsPanel  = document.getElementById('settings-panel');
+const text1Input     = document.getElementById('text1-input');
+const text2Input     = document.getElementById('text2-input');
+const text3Input     = document.getElementById('text3-input');
+const settingsReset  = document.getElementById('settings-reset');
+
+text1Input.value = loadText('text1');
+text2Input.value = loadText('text2');
+text3Input.value = loadText('text3');
+
+settingsToggle.addEventListener('click', () => {
+  const hidden = settingsPanel.hasAttribute('hidden');
+  if (hidden) settingsPanel.removeAttribute('hidden');
+  else        settingsPanel.setAttribute('hidden', '');
+  settingsToggle.setAttribute('aria-expanded', String(hidden));
+});
+
+// Regenerate target buffer for one text slot. Empty input falls back to default.
+function updateTextSlot(key, raw) {
+  const value = (raw && raw.trim()) ? raw : TEXT_DEFAULTS[key];
+  saveText(key, raw);
+  const buffer = makeTextTargets(value);
+  if (key === 'text1') helloTargets  = buffer;
+  if (key === 'text2') qwenTargets   = buffer;
+  if (key === 'text3') najdanTargets = buffer;
+}
+
+text1Input.addEventListener('input', (e) => updateTextSlot('text1', e.target.value));
+text2Input.addEventListener('input', (e) => updateTextSlot('text2', e.target.value));
+text3Input.addEventListener('input', (e) => updateTextSlot('text3', e.target.value));
+
+settingsReset.addEventListener('click', () => {
+  for (const k of ['text1', 'text2', 'text3']) {
+    localStorage.removeItem(TEXT_KEY(k));
+  }
+  text1Input.value = TEXT_DEFAULTS.text1;
+  text2Input.value = TEXT_DEFAULTS.text2;
+  text3Input.value = TEXT_DEFAULTS.text3;
+  helloTargets  = makeTextTargets(TEXT_DEFAULTS.text1);
+  qwenTargets   = makeTextTargets(TEXT_DEFAULTS.text2);
+  najdanTargets = makeTextTargets(TEXT_DEFAULTS.text3);
+});
 </script>
 </body>
 </html>
