@@ -354,10 +354,13 @@ const cloudTargets = new Float32Array(PARTICLE_COUNT * 3);
   }
 }
 
-// Sample 2D text into particle targets by rendering to an offscreen canvas
+// Sample 2D text into particle targets by rendering to an offscreen canvas.
+// Auto-shrinks font to fit within the canvas, then maps the actual text
+// bounding box (not the whole canvas) into world space so long strings
+// don't clip and short strings don't render tiny.
 function makeTextTargets(text) {
   const out = new Float32Array(PARTICLE_COUNT * 3);
-  const w = 1024, h = 256;
+  const w = 1536, h = 320;
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
@@ -366,37 +369,51 @@ function makeTextTargets(text) {
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = 'bold 160px -apple-system, "Segoe UI", sans-serif';
-  ctx.fillText(text, w/2, h/2);
 
+  // Auto-fit: shrink font until text fits within 92% of canvas width
+  const maxW = w * 0.92;
+  let fontSize = 200;
+  const fontFamily = '-apple-system, "Segoe UI", sans-serif';
+  ctx.font = `bold ${fontSize}px ${fontFamily}`;
+  while (ctx.measureText(text).width > maxW && fontSize > 16) {
+    fontSize -= 4;
+    ctx.font = `bold ${fontSize}px ${fontFamily}`;
+  }
+  ctx.fillText(text, w / 2, h / 2);
+
+  // Sample bright pixels and track their bounding box on canvas
   const img = ctx.getImageData(0, 0, w, h).data;
   const pts = [];
-  // Subsample to find bright pixels
+  let minX = w, maxX = 0, minY = h, maxY = 0;
   const step = 2;
   for (let y = 0; y < h; y += step) {
     for (let x = 0; x < w; x += step) {
-      const idx = (y * w + x) * 4;
-      if (img[idx] > 128) {
+      if (img[(y * w + x) * 4] > 128) {
         pts.push([x, y]);
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
       }
     }
   }
+  if (pts.length === 0) return sphereTargets.slice();
 
-  if (pts.length === 0) {
-    // fallback to sphere
-    return sphereTargets.slice();
-  }
+  // Fit text bbox to world bounds (~24 wide, ~6 tall) preserving aspect
+  const textW = Math.max(maxX - minX, 1);
+  const textH = Math.max(maxY - minY, 1);
+  const worldW = 24, worldH = 6;
+  const scale = Math.min(worldW / textW, worldH / textH);
+  const bboxCx = (minX + maxX) / 2;
+  const bboxCy = (minY + maxY) / 2;
 
-  // Map text pixels to world coords. Scale to ~ width 24, height 6
-  const targetW = 24, targetH = 6;
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const p = pts[Math.floor(Math.random() * pts.length)];
-    const nx = (p[0] / w - 0.5) * targetW;
-    const ny = -(p[1] / h - 0.5) * targetH;
-    const nz = (Math.random() - 0.5) * 0.8; // slight depth
+    const nx =  (p[0] - bboxCx) * scale;
+    const ny = -(p[1] - bboxCy) * scale;
     out[i*3]   = nx + (Math.random() - 0.5) * 0.15;
     out[i*3+1] = ny + (Math.random() - 0.5) * 0.15;
-    out[i*3+2] = nz;
+    out[i*3+2] = (Math.random() - 0.5) * 0.8;
   }
   return out;
 }
